@@ -5,6 +5,9 @@ on:
     - cron: '0 4 * * *'
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: read
   packages: write
@@ -42,7 +45,7 @@ jobs:
 
       - name: Build and push if upstream changed
         if: steps.upstream.outputs.digest != steps.previous.outputs.digest
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
