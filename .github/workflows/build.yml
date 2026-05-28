@@ -9,14 +9,14 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
@@ -30,23 +30,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get latest paperless-ngx digest
-        id: upstream
+      - name: Get latest paperless-ngx release tag
+        id: upstream_release
         run: |
-          DIGEST=$(docker buildx imagetools inspect ghcr.io/paperless-ngx/paperless-ngx:latest --format '{{json .Manifest.Digest}}' | tr -d '"')
-          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+          TAG=$(curl -s https://api.github.com/repos/paperless-ngx/paperless-ngx/releases/latest | jq -r .tag_name)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Get previously built digest
-        id: previous
+      - name: Get previously built tag
+        id: previous_tag
         run: |
-          DIGEST=$(docker buildx imagetools inspect ghcr.io/water1309/paperless-ngx-nl:latest --format '{{json .Manifest.Digest}}' 2>/dev/null || echo "none")
-          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+          TAG=$(cat .last_built_tag 2>/dev/null || echo "none")
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
         continue-on-error: true
 
-      - name: Build and push if upstream changed
-        if: steps.upstream.outputs.digest != steps.previous.outputs.digest
+      - name: Build and push if new release
+        if: steps.upstream_release.outputs.tag != steps.previous_tag.outputs.tag
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/water1309/paperless-ngx-nl:latest
+          tags: |
+            ghcr.io/water1309/paperless-ngx-nl:latest
+            ghcr.io/water1309/paperless-ngx-nl:${{ steps.upstream_release.outputs.tag }}
+
+      - name: Save built tag
+        if: steps.upstream_release.outputs.tag != steps.previous_tag.outputs.tag
+        run: |
+          echo "${{ steps.upstream_release.outputs.tag }}" > .last_built_tag
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add .last_built_tag
+          git commit -m "Built paperless-ngx ${{ steps.upstream_release.outputs.tag }}"
+          git push
