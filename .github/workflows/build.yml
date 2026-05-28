@@ -2,8 +2,12 @@ name: Build and Push paperless-ngx-nl
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # Check daily at 4AM
-  workflow_dispatch:  # Allow manual trigger
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   build-and-push:
