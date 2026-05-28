@@ -1,0 +1,45 @@
+name: Build and Push paperless-ngx-nl
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # Check daily at 4AM
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get latest paperless-ngx digest
+        id: upstream
+        run: |
+          DIGEST=$(docker buildx imagetools inspect ghcr.io/paperless-ngx/paperless-ngx:latest --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
+      - name: Get previously built digest
+        id: previous
+        run: |
+          DIGEST=$(docker buildx imagetools inspect ghcr.io/water1309/paperless-ngx-nl:latest --format '{{json .Manifest.Digest}}' 2>/dev/null || echo "none")
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Build and push if upstream changed
+        if: steps.upstream.outputs.digest != steps.previous.outputs.digest
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/water1309/paperless-ngx-nl:latest
