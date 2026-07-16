@@ -1,24 +1,26 @@
+# .github/workflows/build.yml — paperless-ngx-nl
 name: Build and Push paperless-ngx-nl
 
 on:
   schedule:
     - cron: '0 4 * * *'
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild even if the upstream tag is unchanged (after editing the Dockerfile)'
+        type: boolean
+        default: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
-  contents: write
-  packages: write
+  contents: write        # to commit .last_built_tag
+  packages: write        # to push to GHCR
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,35 +32,81 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get latest paperless-ngx release tag
-        id: upstream_release
+      - name: Check for a new upstream release
+        id: check
         run: |
-          TAG=$(curl -s https://api.github.com/repos/paperless-ngx/paperless-ngx/releases/latest | jq -r .tag_name)
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          TAG=$(curl -sfL https://api.github.com/repos/paperless-ngx/paperless-ngx/releases/latest | jq -r .tag_name)
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::could not read the latest release tag from the GitHub API"; exit 1
+          fi
+          PREV=$(cat .last_built_tag 2>/dev/null || echo none)
+          echo "release_tag=$TAG"  >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$PREV" >> "$GITHUB_OUTPUT"
+          if [ "$TAG" = "$PREV" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "up to date: $TAG already built"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "building: $PREV -> $TAG"
+          fi
 
-      - name: Get previously built tag
-        id: previous_tag
+      # Release tag_name is v-prefixed (v2.20.15) but upstream's DOCKER tag may not be — the image's
+      # own version label reads 2.20.15. Find which exists; guessing wrong is a 404 at build time.
+      - name: Resolve upstream docker tag
+        id: upstream
+        if: steps.check.outputs.build == 'true'
         run: |
-          TAG=$(cat .last_built_tag 2>/dev/null || echo "none")
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-        continue-on-error: true
+          set -euo pipefail
+          BASE=ghcr.io/paperless-ngx/paperless-ngx
+          TAG='${{ steps.check.outputs.release_tag }}'
+          if docker manifest inspect "$BASE:$TAG" >/dev/null 2>&1; then
+            UP="$TAG"
+          elif docker manifest inspect "$BASE:${TAG#v}" >/dev/null 2>&1; then
+            UP="${TAG#v}"
+          else
+            echo "::error::release $TAG exists but $BASE:$TAG / :${TAG#v} is not published yet."
+            echo "::error::Not building — a tag must never claim a version it does not contain."
+            echo "::error::Tomorrow's scheduled run will retry."
+            exit 1
+          fi
+          echo "docker_tag=$UP" >> "$GITHUB_OUTPUT"
+          echo "upstream image: $BASE:$UP"
 
-      - name: Build and push if new release
-        if: steps.upstream_release.outputs.tag != steps.previous_tag.outputs.tag
+      - name: Build and push
+        id: build
+        if: steps.check.outputs.build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          build-args: |
+            PAPERLESS_VERSION=${{ steps.upstream.outputs.docker_tag }}
           tags: |
             ghcr.io/water1309/paperless-ngx-nl:latest
-            ghcr.io/water1309/paperless-ngx-nl:${{ steps.upstream_release.outputs.tag }}
+            ghcr.io/water1309/paperless-ngx-nl:${{ steps.check.outputs.release_tag }}
+
+      - name: Summary
+        if: steps.check.outputs.build == 'true'
+        run: |
+          {
+            echo "### Pushed \`${{ steps.check.outputs.release_tag }}\`"
+            echo ""
+            echo "built FROM \`ghcr.io/paperless-ngx/paperless-ngx:${{ steps.upstream.outputs.docker_tag }}\`"
+            echo ""
+            echo '```yaml'
+            echo "    image: ghcr.io/water1309/paperless-ngx-nl:${{ steps.check.outputs.release_tag }}@${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save built tag
-        if: steps.upstream_release.outputs.tag != steps.previous_tag.outputs.tag
+        if: steps.check.outputs.build == 'true'
         run: |
-          echo "${{ steps.upstream_release.outputs.tag }}" > .last_built_tag
-          git config user.name github-actions
+          set -euo pipefail
+          echo "${{ steps.check.outputs.release_tag }}" > .last_built_tag
+          git config user.name  github-actions
           git config user.email github-actions@github.com
           git add .last_built_tag
-          git commit -m "Built paperless-ngx ${{ steps.upstream_release.outputs.tag }}"
+          git diff --cached --quiet && { echo "no change to .last_built_tag"; exit 0; }
+          git commit -m "Built paperless-ngx ${{ steps.check.outputs.release_tag }}"
           git push
